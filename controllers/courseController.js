@@ -9,13 +9,17 @@ export const getAllCourses = catchAsyncError(async (req, res, next) => {
   const keyword = req.query.keyword || "";
   const category = req.query.category || "";
 
+  // Sanitize input to prevent NoSQL injection
+  const sanitizedKeyword = typeof keyword === 'string' ? keyword : "";
+  const sanitizedCategory = typeof category === 'string' ? category : "";
+
   const courses = await Course.find({
     title: {
-      $regex: keyword,
+      $regex: sanitizedKeyword,
       $options: "i",
     },
     category: {
-      $regex: category,
+      $regex: sanitizedCategory,
       $options: "i",
     },
   }).select("-lectures");
@@ -32,6 +36,7 @@ export const createCourse = catchAsyncError(async (req, res, next) => {
     return next(new ErrorHandler("Please add all fields", 400));
 
   const file = req.file;
+  if (!file) return next(new ErrorHandler("Please upload a poster", 400));
 
   const fileUri = getDataUri(file);
 
@@ -59,9 +64,12 @@ export const getCourseLectures = catchAsyncError(async (req, res, next) => {
 
   if (!course) return next(new ErrorHandler("Course not found", 404));
 
-  course.views += 1;
-
-  await course.save();
+  try {
+    course.views += 1;
+    await course.save();
+  } catch (error) {
+    return next(new ErrorHandler("Failed to update course views", 500));
+  }
 
   res.status(200).json({
     success: true,
@@ -137,6 +145,8 @@ export const deleteLecture = catchAsyncError(async (req, res, next) => {
   const lecture = course.lectures.find((item) => {
     if (item._id.toString() === lectureId.toString()) return item;
   });
+  
+  if (!lecture) return next(new ErrorHandler("Lecture not found", 404));
   await cloudinary.v2.uploader.destroy(lecture.video.public_id, {
     resource_type: "video",
   });

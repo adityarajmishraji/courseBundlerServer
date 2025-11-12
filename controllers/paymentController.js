@@ -8,6 +8,8 @@ import { Payment } from "../models/Payment.js";
 export const buySubscription = catchAsyncError(async (req, res, next) => {
   const user = await User.findById(req.user._id);
 
+  if (!user) return next(new ErrorHandler("User not found", 404));
+  
   if (user.role === "admin")
     return next(new ErrorHandler("Admin can't buy subscription", 400));
 
@@ -49,20 +51,29 @@ export const paymentVerification = catchAsyncError(async (req, res, next) => {
   if (!isAuthentic)
     return res.redirect(`${process.env.FRONTEND_URL}/paymentfail`);
 
-  // database comes here
-  await Payment.create({
-    razorpay_signature,
-    razorpay_payment_id,
-    razorpay_subscription_id,
-  });
+  try {
+    // database comes here
+    await Payment.create({
+      razorpay_signature,
+      razorpay_payment_id,
+      razorpay_subscription_id,
+    });
 
-  user.subscription.status = "active";
+    user.subscription.status = "active";
+    await user.save();
 
-  await user.save();
+    // Validate frontend URL to prevent open redirect
+    const frontendUrl = process.env.FRONTEND_URL;
+    if (!frontendUrl || !frontendUrl.startsWith('http')) {
+      return next(new ErrorHandler("Invalid frontend URL configuration", 500));
+    }
 
-  res.redirect(
-    `${process.env.FRONTEND_URL}/paymentsuccess?reference=${razorpay_payment_id}`
-  );
+    res.redirect(
+      `${frontendUrl}/paymentsuccess?reference=${razorpay_payment_id}`
+    );
+  } catch (error) {
+    return next(new ErrorHandler("Payment processing failed", 500));
+  }
 });
 
 export const getRazorPayKey = catchAsyncError(async (req, res, next) => {
@@ -78,25 +89,30 @@ export const cancelSubscription = catchAsyncError(async (req, res, next) => {
   const subscriptionId = user.subscription.id;
   let refund = false;
 
-  await instance.subscriptions.cancel(subscriptionId);
+  try {
+    await instance.subscriptions.cancel(subscriptionId);
 
-  const payment = await Payment.findOne({
-    razorpay_subscription_id: subscriptionId,
-  });
+    const payment = await Payment.findOne({
+      razorpay_subscription_id: subscriptionId,
+    });
 
-  const gap = Date.now() - payment.createdAt;
+    if (payment) {
+      const gap = Date.now() - payment.createdAt;
+      const refundTime = process.env.REFUND_DAYS * 24 * 60 * 60 * 1000;
 
-  const refundTime = process.env.REFUND_DAYS * 24 * 60 * 60 * 1000;
-
-  if (refundTime > gap) {
-    await instance.payments.refund(payment.razorpay_payment_id);
-    refund = true;
+      if (refundTime > gap) {
+        await instance.payments.refund(payment.razorpay_payment_id);
+        refund = true;
+      }
+      await payment.remove();
+    }
+    
+    user.subscription.id = undefined;
+    user.subscription.status = undefined;
+    await user.save();
+  } catch (error) {
+    return next(new ErrorHandler("Cancellation failed", 500));
   }
-
-  await payment.remove();
-  user.subscription.id = undefined;
-  user.subscription.status = undefined;
-  await user.save();
 
   res.status(200).json({
     success: true,
